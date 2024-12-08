@@ -41,6 +41,8 @@ typedef struct bracket {
   bool image;
   bool active;
   bool bracket_after;
+  bool in_bracket_image0;
+  bool in_bracket_image1;
 } bracket;
 
 typedef struct subject{
@@ -55,6 +57,7 @@ typedef struct subject{
   bracket *last_bracket;
   bufsize_t backticks[MAXBACKTICKS + 1];
   bool scanned_for_backticks;
+  bool no_link_openers;
 } subject;
 
 // Extensions may populate this.
@@ -172,6 +175,7 @@ static void subject_from_buf(cmark_mem *mem, int line_number, int block_offset, 
     e->backticks[i] = 0;
   }
   e->scanned_for_backticks = false;
+  e->no_link_openers = true;
 }
 
 static CMARK_INLINE int isbacktick(int c) { return (c == '`'); }
@@ -516,6 +520,8 @@ static void push_bracket(subject *subj, bool image, cmark_node *inl_text) {
   bracket *b = (bracket *)subj->mem->calloc(1, sizeof(bracket));
   if (subj->last_bracket != NULL) {
     subj->last_bracket->bracket_after = true;
+    b->in_bracket_image0 = subj->last_bracket->in_bracket_image0;
+    b->in_bracket_image1 = subj->last_bracket->in_bracket_image1;
   }
   b->image = image;
   b->active = true;
@@ -524,7 +530,15 @@ static void push_bracket(subject *subj, bool image, cmark_node *inl_text) {
   b->previous_delimiter = subj->last_delim;
   b->position = subj->pos;
   b->bracket_after = false;
+  if (image) {
+    b->in_bracket_image1 = true;
+  } else {
+    b->in_bracket_image0 = true;
+  }
   subj->last_bracket = b;
+  if (!image) {
+    subj->no_link_openers = false;
+  }
 }
 
 // Assumes the subject has a c at the current position.
@@ -1056,15 +1070,15 @@ static cmark_node *handle_close_bracket(cmark_parser *parser, subject *subj) {
     return make_str(subj, subj->pos - 1, subj->pos - 1, cmark_chunk_literal("]"));
   }
 
-  if (!opener->active) {
+  // If we got here, we matched a potential link/image text.
+  // Now we check to see if it's a link/image.
+  is_image = opener->image;
+
+  if (!is_image && subj->no_link_openers) {
     // take delimiter off stack
     pop_bracket(subj);
     return make_str(subj, subj->pos - 1, subj->pos - 1, cmark_chunk_literal("]"));
   }
-
-  // If we got here, we matched a potential link/image text.
-  // Now we check to see if it's a link/image.
-  is_image = opener->image;
 
   after_link_text_pos = subj->pos;
 
@@ -1239,21 +1253,11 @@ match:
   process_emphasis(parser, subj, opener->previous_delimiter);
   pop_bracket(subj);
 
-  // Now, if we have a link, we also want to deactivate earlier link
-  // delimiters. (This code can be removed if we decide to allow links
+  // Now, if we have a link, we also want to deactivate links until
+  // we get a new opener. (This code can be removed if we decide to allow links
   // inside links.)
   if (!is_image) {
-    opener = subj->last_bracket;
-    while (opener != NULL) {
-      if (!opener->image) {
-        if (!opener->active) {
-          break;
-        } else {
-          opener->active = false;
-        }
-      }
-      opener = opener->previous;
-    }
+    subj->no_link_openers = true;
   }
 
   return NULL;
@@ -1662,10 +1666,15 @@ cmark_chunk *cmark_inline_parser_get_chunk(cmark_inline_parser *parser) {
 }
 
 int cmark_inline_parser_in_bracket(cmark_inline_parser *parser, int image) {
-  for (bracket *b = parser->last_bracket; b; b = b->previous)
-    if (b->active && b->image == (image != 0))
-      return 1;
-  return 0;
+  bracket *b = parser->last_bracket;
+  if (!b) {
+    return 0;
+  }
+  if (image != 0) {
+    return b->in_bracket_image1;
+  } else {
+    return b->in_bracket_image0;
+  }
 }
 
 void cmark_node_unput(cmark_node *node, int n) {
